@@ -3472,8 +3472,8 @@ function kbGetAll() {
 // Configuration
 
 var KB_CLOUD_CONFIG = {
-    // Pre-configured for gong111-boo/boss-kb
-    token: '',           // User enters token via settings panel (stored in localStorage)
+    // owner/repo pre-configured, token entered once by user and saved in browser
+    token: '',
     owner: 'gong111-boo',
     repo: 'boss-kb',
     branch: 'main',
@@ -3614,38 +3614,65 @@ function saveChanges() {
     // If cloud is configured, also save to GitHub
     if (isCloudConfigured()) {
         showToast('⏳ 正在保存到云端...', 2000);
-        // Get current sha first (lightweight — don't download content)
+
+        // Save edit data to kb_data.json via GitHub API
         githubGetFileSha(KB_CLOUD_CONFIG.dataPath).then(function(existing) {
             var sha = existing ? existing.sha : null;
-            return githubPutFile(KB_CLOUD_CONFIG.dataPath, jsonStr, sha, 'Save edits: ' + data['_savedAt']);
+            return githubPutFile(KB_CLOUD_CONFIG.dataPath, jsonStr, sha, 'Save data: ' + data['_savedAt']);
         }).then(function() {
-            showToast('☁️ 云端保存成功！所有设备可见', 2000);
+            showToast('☁️ 云端保存成功！所有设备刷新即可看到', 3000);
             hasUnsavedChanges = false;
             updateSaveIndicator();
         }).catch(function(err) {
             console.error('Cloud save failed:', err);
-            // If sha mismatch (422), try without sha (force create)
-            if (err.message.indexOf('422') >= 0) {
+            if (err.message.indexOf('422') >= 0 || err.message.indexOf('409') >= 0) {
+                // Retry without sha
                 showToast('⏳ 重试中...', 1000);
-                githubPutFile(KB_CLOUD_CONFIG.dataPath, jsonStr, null, 'Save edits (retry): ' + data['_savedAt']).then(function() {
+                githubPutFile(KB_CLOUD_CONFIG.dataPath, jsonStr, null, 'Save data (retry): ' + data['_savedAt']).then(function() {
                     showToast('☁️ 云端保存成功！', 2000);
                     hasUnsavedChanges = false;
                     updateSaveIndicator();
                 }).catch(function(err2) {
-                    showToast('⚠️ 云端保存失败：' + err2.message, 4000);
+                    showToast('⚠️ 重试失败：' + err2.message, 4000);
+                    hasUnsavedChanges = false;
+                    updateSaveIndicator();
                 });
             } else {
                 showToast('⚠️ 云端保存失败：' + err.message + '（已保存到本地）', 4000);
+                hasUnsavedChanges = false;
+                updateSaveIndicator();
             }
-            hasUnsavedChanges = false;
-            updateSaveIndicator();
         });
     } else {
         // No cloud config — just save locally
-        showToast('💾 已保存到本地浏览器（未配置云端，点⚙️设置）', 3000);
+        showToast('💾 已保存到本地浏览器', 3000);
         hasUnsavedChanges = false;
         updateSaveIndicator();
     }
+}
+
+// Save the full HTML page to GitHub (updates index.html, triggers GitHub Pages rebuild)
+function saveFullHTMLToGitHub() {
+    // Clone the current page, strip edit-mode elements
+    var clone = document.documentElement.cloneNode(true);
+    clone.querySelectorAll('.edit-toolbar, .edit-banner, .case-edit-overlay, .case-edit-btn, .add-case-btn, .step-actions, .case-actions, .image-actions, .add-step-btn, #autoExportBanner, #cloudSettingsOverlay').forEach(function(el) {
+        el.remove();
+    });
+    clone.querySelectorAll('[contenteditable]').forEach(function(el) {
+        el.removeAttribute('contenteditable');
+    });
+    var bodyEl = clone.querySelector('body');
+    if (bodyEl) {
+        bodyEl.classList.remove('edit-mode');
+        bodyEl.style.paddingTop = '';
+    }
+    var html = '<!DOCTYPE html>\n' + clone.outerHTML;
+
+    // Get current sha of index.html on GitHub, then update it
+    return githubGetFileSha('index.html').then(function(existing) {
+        var sha = existing ? existing.sha : null;
+        return githubPutFile('index.html', html, sha, 'Auto-deploy: page updated at ' + new Date().toLocaleString('zh-CN'));
+    });
 }
 
 // Local backup via IndexedDB (fallback when cloud is not available)
@@ -3674,24 +3701,40 @@ function saveToLocalBackup(data) {
 function restoreChanges() {
     loadCloudConfig();
 
-    if (isCloudConfigured()) {
-        // Load from GitHub API
-        githubGetFile(KB_CLOUD_CONFIG.dataPath).then(function(result) {
-            if (!result || !result.content) {
-                console.log('[KB] No cloud data yet, trying local');
-                restoreFromLocal();
-                return;
-            }
-            var data = JSON.parse(result.content);
+    // Step 1: Try fetching kb_data.json from same origin (GitHub Pages) — NO TOKEN NEEDED
+    // This works on any device/browser that opens the GitHub Pages URL
+    fetch('kb_data.json?t=' + Date.now())
+        .then(function(res) {
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return res.text();
+        })
+        .then(function(text) {
+            if (!text || text.length < 10) throw new Error('Empty data');
+            var data = JSON.parse(text);
             applyRestoredData(data);
-            console.log('[KB] Restored from cloud (GitHub)');
-        }).catch(function(err) {
-            console.warn('[KB] Cloud load failed, trying local:', err);
-            restoreFromLocal();
+            console.log('[KB] Restored from GitHub Pages (no token needed)');
+        })
+        .catch(function(err) {
+            console.warn('[KB] Pages fetch failed, trying GitHub API:', err.message);
+            // Step 2: Fall back to GitHub API (requires token)
+            if (isCloudConfigured()) {
+                githubGetFile(KB_CLOUD_CONFIG.dataPath).then(function(result) {
+                    if (!result || !result.content) {
+                        console.log('[KB] No cloud data yet, trying local');
+                        restoreFromLocal();
+                        return;
+                    }
+                    var data = JSON.parse(result.content);
+                    applyRestoredData(data);
+                    console.log('[KB] Restored from cloud (GitHub API)');
+                }).catch(function(err2) {
+                    console.warn('[KB] API load failed, trying local:', err2);
+                    restoreFromLocal();
+                });
+            } else {
+                restoreFromLocal();
+            }
         });
-    } else {
-        restoreFromLocal();
-    }
 }
 
 // Restore from local IndexedDB or localStorage
