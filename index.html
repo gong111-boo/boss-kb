@@ -3472,24 +3472,25 @@ function kbGetAll() {
 // Configuration
 
 var KB_CLOUD_CONFIG = {
-    // These will be set by the user via a settings panel
-    token: '',           // GitHub Personal Access Token (with repo scope)
-    owner: '',           // GitHub username or org
-    repo: '',            // Repository name
-    branch: 'main',      // Branch name
-    dataPath: 'kb_data.json'  // Path to store edit data
+    // Pre-configured for gong111-boo/boss-kb
+    token: '',           // User enters token via settings panel (stored in localStorage)
+    owner: 'gong111-boo',
+    repo: 'boss-kb',
+    branch: 'main',
+    dataPath: 'kb_data.json'
 };
 
-// Load cloud config from localStorage
+// Load cloud config from localStorage (but keep pre-filled defaults)
 function loadCloudConfig() {
     try {
         var saved = localStorage.getItem('kb_cloud_config');
         if (saved) {
             var cfg = JSON.parse(saved);
-            KB_CLOUD_CONFIG.token = cfg.token || '';
-            KB_CLOUD_CONFIG.owner = cfg.owner || '';
-            KB_CLOUD_CONFIG.repo = cfg.repo || '';
-            KB_CLOUD_CONFIG.branch = cfg.branch || 'main';
+            // Only override if the saved value is non-empty
+            if (cfg.token) KB_CLOUD_CONFIG.token = cfg.token;
+            if (cfg.owner) KB_CLOUD_CONFIG.owner = cfg.owner;
+            if (cfg.repo) KB_CLOUD_CONFIG.repo = cfg.repo;
+            if (cfg.branch) KB_CLOUD_CONFIG.branch = cfg.branch;
         }
     } catch(e) {}
 }
@@ -3504,6 +3505,25 @@ function saveCloudConfig() {
 // Check if cloud is configured
 function isCloudConfigured() {
     return KB_CLOUD_CONFIG.token && KB_CLOUD_CONFIG.owner && KB_CLOUD_CONFIG.repo;
+}
+
+// GitHub API: Get file sha only (lightweight, don't download content)
+function githubGetFileSha(path) {
+    var url = 'https://api.github.com/repos/' + KB_CLOUD_CONFIG.owner + '/' + KB_CLOUD_CONFIG.repo + '/contents/' + path + '?ref=' + KB_CLOUD_CONFIG.branch;
+    return fetch(url, {
+        method: 'GET',
+        headers: {
+            'Authorization': 'token ' + KB_CLOUD_CONFIG.token,
+            'Accept': 'application/vnd.github.v3+json'
+        }
+    }).then(function(res) {
+        if (res.status === 404) return null;
+        if (!res.ok) throw new Error('GitHub GET: ' + res.status);
+        return res.json();
+    }).then(function(data) {
+        if (!data) return null;
+        return { sha: data.sha, content: null };
+    });
 }
 
 // GitHub API: Get file content (and sha for updates)
@@ -3522,7 +3542,9 @@ function githubGetFile(path) {
     }).then(function(data) {
         if (!data) return null;
         // Decode base64 content
-        var content = atob(data.content.replace(/\n/g, ''));
+        var raw = atob(data.content.replace(/\n/g, ''));
+        // Handle UTF-8
+        var content = decodeURIComponent(escape(raw));
         return { content: content, sha: data.sha };
     });
 }
@@ -3531,6 +3553,12 @@ function githubGetFile(path) {
 function githubPutFile(path, content, sha, message) {
     var url = 'https://api.github.com/repos/' + KB_CLOUD_CONFIG.owner + '/' + KB_CLOUD_CONFIG.repo + '/contents/' + path;
     var encoded = btoa(unescape(encodeURIComponent(content)));
+    var body = {
+        message: message || 'Update knowledge base',
+        content: encoded,
+        branch: KB_CLOUD_CONFIG.branch
+    };
+    if (sha) body.sha = sha;
     return fetch(url, {
         method: 'PUT',
         headers: {
@@ -3538,14 +3566,13 @@ function githubPutFile(path, content, sha, message) {
             'Accept': 'application/vnd.github.v3+json',
             'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-            message: message || 'Update knowledge base',
-            content: encoded,
-            sha: sha,
-            branch: KB_CLOUD_CONFIG.branch
-        })
+        body: JSON.stringify(body)
     }).then(function(res) {
-        if (!res.ok) throw new Error('GitHub API: ' + res.status);
+        if (!res.ok) {
+            return res.json().then(function(errData) {
+                throw new Error('GitHub PUT ' + res.status + ': ' + (errData.message || 'Unknown'));
+            });
+        }
         return res.json();
     });
 }
@@ -3587,8 +3614,8 @@ function saveChanges() {
     // If cloud is configured, also save to GitHub
     if (isCloudConfigured()) {
         showToast('⏳ 正在保存到云端...', 2000);
-        // Get current sha first (needed for update)
-        githubGetFile(KB_CLOUD_CONFIG.dataPath).then(function(existing) {
+        // Get current sha first (lightweight — don't download content)
+        githubGetFileSha(KB_CLOUD_CONFIG.dataPath).then(function(existing) {
             var sha = existing ? existing.sha : null;
             return githubPutFile(KB_CLOUD_CONFIG.dataPath, jsonStr, sha, 'Save edits: ' + data['_savedAt']);
         }).then(function() {
@@ -3597,7 +3624,19 @@ function saveChanges() {
             updateSaveIndicator();
         }).catch(function(err) {
             console.error('Cloud save failed:', err);
-            showToast('⚠️ 云端保存失败：' + err.message + '（已保存到本地）', 4000);
+            // If sha mismatch (422), try without sha (force create)
+            if (err.message.indexOf('422') >= 0) {
+                showToast('⏳ 重试中...', 1000);
+                githubPutFile(KB_CLOUD_CONFIG.dataPath, jsonStr, null, 'Save edits (retry): ' + data['_savedAt']).then(function() {
+                    showToast('☁️ 云端保存成功！', 2000);
+                    hasUnsavedChanges = false;
+                    updateSaveIndicator();
+                }).catch(function(err2) {
+                    showToast('⚠️ 云端保存失败：' + err2.message, 4000);
+                });
+            } else {
+                showToast('⚠️ 云端保存失败：' + err.message + '（已保存到本地）', 4000);
+            }
             hasUnsavedChanges = false;
             updateSaveIndicator();
         });
