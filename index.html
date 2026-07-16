@@ -3480,6 +3480,9 @@ var KB_CLOUD_CONFIG = {
     dataPath: 'kb_data.json'
 };
 
+// 检测是否在本地编辑器模式（localhost）
+var KB_LOCAL_MODE = (location.hostname === 'localhost' || location.hostname === '127.0.0.1') && location.port !== '';
+
 // Load cloud config from localStorage (but keep pre-filled defaults)
 function loadCloudConfig() {
     try {
@@ -3502,8 +3505,9 @@ function saveCloudConfig() {
     } catch(e) {}
 }
 
-// Check if cloud is configured
+// Check if cloud is configured (本地模式自动视为已配置)
 function isCloudConfigured() {
+    if (KB_LOCAL_MODE) return true;  // 本地编辑器模式，Python 服务器处理 Token
     return KB_CLOUD_CONFIG.token && KB_CLOUD_CONFIG.owner && KB_CLOUD_CONFIG.repo;
 }
 
@@ -3613,36 +3617,60 @@ function saveChanges() {
 
     // If cloud is configured, also save to GitHub
     if (isCloudConfigured()) {
-        showToast('⏳ 正在保存到云端...', 2000);
-
-        // Save edit data to kb_data.json via GitHub API
-        githubGetFileSha(KB_CLOUD_CONFIG.dataPath).then(function(existing) {
-            var sha = existing ? existing.sha : null;
-            return githubPutFile(KB_CLOUD_CONFIG.dataPath, jsonStr, sha, 'Save data: ' + data['_savedAt']);
-        }).then(function() {
-            showToast('☁️ 云端保存成功！所有设备刷新即可看到', 3000);
-            hasUnsavedChanges = false;
-            updateSaveIndicator();
-        }).catch(function(err) {
-            console.error('Cloud save failed:', err);
-            if (err.message.indexOf('422') >= 0 || err.message.indexOf('409') >= 0) {
-                // Retry without sha
-                showToast('⏳ 重试中...', 1000);
-                githubPutFile(KB_CLOUD_CONFIG.dataPath, jsonStr, null, 'Save data (retry): ' + data['_savedAt']).then(function() {
-                    showToast('☁️ 云端保存成功！', 2000);
+        // 本地编辑器模式：直接 POST 到 Python 服务器，无需 Token
+        if (KB_LOCAL_MODE) {
+            showToast('⏳ 正在上传到云端...', 2000);
+            fetch('/api/save', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    content: jsonStr,
+                    message: '编辑器保存: ' + data['_savedAt']
+                })
+            }).then(function(res) { return res.json(); })
+            .then(function(result) {
+                if (result.success) {
+                    showToast('☁️ 云端保存成功！所有设备刷新即可看到', 3000);
                     hasUnsavedChanges = false;
                     updateSaveIndicator();
-                }).catch(function(err2) {
-                    showToast('⚠️ 重试失败：' + err2.message, 4000);
-                    hasUnsavedChanges = false;
-                    updateSaveIndicator();
-                });
-            } else {
-                showToast('⚠️ 云端保存失败：' + err.message + '（已保存到本地）', 4000);
+                } else {
+                    showToast('⚠️ 保存失败：' + result.message, 4000);
+                }
+            }).catch(function(err) {
+                showToast('⚠️ 保存失败：' + err.message + '（已保存到本地）', 4000);
                 hasUnsavedChanges = false;
                 updateSaveIndicator();
-            }
-        });
+            });
+        } else {
+            // GitHub Pages 模式：使用 GitHub API（需要 Token）
+            showToast('⏳ 正在保存到云端...', 2000);
+            githubGetFileSha(KB_CLOUD_CONFIG.dataPath).then(function(existing) {
+                var sha = existing ? existing.sha : null;
+                return githubPutFile(KB_CLOUD_CONFIG.dataPath, jsonStr, sha, 'Save data: ' + data['_savedAt']);
+            }).then(function() {
+                showToast('☁️ 云端保存成功！所有设备刷新即可看到', 3000);
+                hasUnsavedChanges = false;
+                updateSaveIndicator();
+            }).catch(function(err) {
+                console.error('Cloud save failed:', err);
+                if (err.message.indexOf('422') >= 0 || err.message.indexOf('409') >= 0) {
+                    showToast('⏳ 重试中...', 1000);
+                    githubPutFile(KB_CLOUD_CONFIG.dataPath, jsonStr, null, 'Save data (retry): ' + data['_savedAt']).then(function() {
+                        showToast('☁️ 云端保存成功！', 2000);
+                        hasUnsavedChanges = false;
+                        updateSaveIndicator();
+                    }).catch(function(err2) {
+                        showToast('⚠️ 重试失败：' + err2.message, 4000);
+                        hasUnsavedChanges = false;
+                        updateSaveIndicator();
+                    });
+                } else {
+                    showToast('⚠️ 云端保存失败：' + err.message + '（已保存到本地）', 4000);
+                    hasUnsavedChanges = false;
+                    updateSaveIndicator();
+                }
+            });
+        }
     } else {
         // No cloud config — just save locally
         showToast('💾 已保存到本地浏览器', 3000);
@@ -3701,8 +3729,27 @@ function saveToLocalBackup(data) {
 function restoreChanges() {
     loadCloudConfig();
 
-    // Step 1: Try fetching kb_data.json from same origin (GitHub Pages) — NO TOKEN NEEDED
-    // This works on any device/browser that opens the GitHub Pages URL
+    // 本地编辑器模式：从 Python 服务器 API 加载最新数据
+    if (KB_LOCAL_MODE) {
+        fetch('/api/load')
+            .then(function(res) {
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                return res.text();
+            })
+            .then(function(text) {
+                if (!text || text.length < 10) throw new Error('Empty data');
+                var data = JSON.parse(text);
+                applyRestoredData(data);
+                console.log('[KB] Restored from local server API (latest cloud data)');
+            })
+            .catch(function(err) {
+                console.warn('[KB] API load failed, trying local file:', err);
+                restoreFromLocal();
+            });
+        return;
+    }
+
+    // GitHub Pages 模式：直接 fetch kb_data.json（无需 Token）
     fetch('kb_data.json?t=' + Date.now())
         .then(function(res) {
             if (!res.ok) throw new Error('HTTP ' + res.status);
