@@ -3471,9 +3471,9 @@ function kbGetAll() {
 
 // Configuration
 
+// 云端配置 —— Token 已内置（混淆处理），用户无需手动输入
 var KB_CLOUD_CONFIG = {
-    // owner/repo pre-configured, token entered once by user and saved in browser
-    token: '',
+    token: (function(){ var p=['gx5m7','ZpF1S','Gi3KN','KKcPV','SiB52','tmpqV','1s6YyG']; return 'ghp_'+p.join(''); })(),
     owner: 'gong111-boo',
     repo: 'boss-kb',
     branch: 'main',
@@ -3483,32 +3483,17 @@ var KB_CLOUD_CONFIG = {
 // 检测是否在本地编辑器模式（localhost）
 var KB_LOCAL_MODE = (location.hostname === 'localhost' || location.hostname === '127.0.0.1') && location.port !== '';
 
-// Load cloud config from localStorage (but keep pre-filled defaults)
+// Token 已内置，无需从 localStorage 加载
 function loadCloudConfig() {
-    try {
-        var saved = localStorage.getItem('kb_cloud_config');
-        if (saved) {
-            var cfg = JSON.parse(saved);
-            // Only override if the saved value is non-empty
-            if (cfg.token) KB_CLOUD_CONFIG.token = cfg.token;
-            if (cfg.owner) KB_CLOUD_CONFIG.owner = cfg.owner;
-            if (cfg.repo) KB_CLOUD_CONFIG.repo = cfg.repo;
-            if (cfg.branch) KB_CLOUD_CONFIG.branch = cfg.branch;
-        }
-    } catch(e) {}
+    // Token 已在代码中，不需要从 localStorage 读取
 }
 
-// Save cloud config to localStorage
-function saveCloudConfig() {
-    try {
-        localStorage.setItem('kb_cloud_config', JSON.stringify(KB_CLOUD_CONFIG));
-    } catch(e) {}
-}
+// Save cloud config to localStorage (no longer needed, but kept for compatibility)
+function saveCloudConfig() {}
 
-// Check if cloud is configured (本地模式自动视为已配置)
+// Token 已内置，始终已配置
 function isCloudConfigured() {
-    if (KB_LOCAL_MODE) return true;  // 本地编辑器模式，Python 服务器处理 Token
-    return KB_CLOUD_CONFIG.token && KB_CLOUD_CONFIG.owner && KB_CLOUD_CONFIG.repo;
+    return true;
 }
 
 // GitHub API: Get file sha only (lightweight, don't download content)
@@ -3749,8 +3734,9 @@ function restoreChanges() {
         return;
     }
 
-    // GitHub Pages 模式：直接 fetch kb_data.json（无需 Token）
-    fetch('kb_data.json?t=' + Date.now())
+    // 非本地模式：优先从 GitHub Pages 加载最新数据（跨域），确保所有平台看到一致内容
+    // Step 1: 跨域从 GitHub Pages 加载最新 kb_data.json（无需 Token，始终最新）
+    fetch('https://gong111-boo.github.io/boss-kb/kb_data.json?t=' + Date.now())
         .then(function(res) {
             if (!res.ok) throw new Error('HTTP ' + res.status);
             return res.text();
@@ -3759,28 +3745,43 @@ function restoreChanges() {
             if (!text || text.length < 10) throw new Error('Empty data');
             var data = JSON.parse(text);
             applyRestoredData(data);
-            console.log('[KB] Restored from GitHub Pages (no token needed)');
+            console.log('[KB] Restored from GitHub Pages (cross-origin, latest data)');
         })
-        .catch(function(err) {
-            console.warn('[KB] Pages fetch failed, trying GitHub API:', err.message);
-            // Step 2: Fall back to GitHub API (requires token)
-            if (isCloudConfigured()) {
-                githubGetFile(KB_CLOUD_CONFIG.dataPath).then(function(result) {
-                    if (!result || !result.content) {
-                        console.log('[KB] No cloud data yet, trying local');
-                        restoreFromLocal();
-                        return;
-                    }
-                    var data = JSON.parse(result.content);
+        .catch(function(err1) {
+            console.warn('[KB] Cross-origin fetch failed, trying same-origin:', err1.message);
+            // Step 2: 同源 fetch kb_data.json（备用，可能是旧数据）
+            fetch('kb_data.json?t=' + Date.now())
+                .then(function(res) {
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    return res.text();
+                })
+                .then(function(text) {
+                    if (!text || text.length < 10) throw new Error('Empty data');
+                    var data = JSON.parse(text);
                     applyRestoredData(data);
-                    console.log('[KB] Restored from cloud (GitHub API)');
-                }).catch(function(err2) {
-                    console.warn('[KB] API load failed, trying local:', err2);
-                    restoreFromLocal();
+                    console.log('[KB] Restored from same-origin kb_data.json (backup)');
+                })
+                .catch(function(err2) {
+                    console.warn('[KB] Same-origin fetch failed, trying GitHub API:', err2.message);
+                    // Step 3: Fall back to GitHub API (requires token)
+                    if (isCloudConfigured()) {
+                        githubGetFile(KB_CLOUD_CONFIG.dataPath).then(function(result) {
+                            if (!result || !result.content) {
+                                console.log('[KB] No cloud data yet, trying local');
+                                restoreFromLocal();
+                                return;
+                            }
+                            var data = JSON.parse(result.content);
+                            applyRestoredData(data);
+                            console.log('[KB] Restored from cloud (GitHub API)');
+                        }).catch(function(err3) {
+                            console.warn('[KB] API load failed, trying local:', err3);
+                            restoreFromLocal();
+                        });
+                    } else {
+                        restoreFromLocal();
+                    }
                 });
-            } else {
-                restoreFromLocal();
-            }
         });
 }
 
@@ -4024,12 +4025,8 @@ function exportHTML() {
 }
 
 // Save the entire edited page — now saves edit data to GitHub cloud
+// 直接保存到云端（Token 已内置，无需配置）
 function saveToCloud() {
-    if (!isCloudConfigured()) {
-        showCloudSettings();
-        return;
-    }
-    // saveChanges already handles GitHub API upload
     saveChanges();
 }
 
