@@ -3566,6 +3566,66 @@ function githubPutFile(path, content, sha, message) {
     });
 }
 
+// Git Data API 保存（可靠处理大文件：blob → tree → commit → ref）
+function githubSaveViaGitAPI(content, message) {
+    var baseUrl = 'https://api.github.com/repos/' + KB_CLOUD_CONFIG.owner + '/' + KB_CLOUD_CONFIG.repo;
+    var headers = {
+        'Authorization': 'token ' + KB_CLOUD_CONFIG.token,
+        'Accept': 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json'
+    };
+    var encoded = btoa(unescape(encodeURIComponent(content)));
+
+    // Step 1: Create blob
+    return fetch(baseUrl + '/git/blobs', {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify({ content: encoded, encoding: 'base64' })
+    }).then(function(res) {
+        if (!res.ok) throw new Error('blob创建失败: ' + res.status);
+        return res.json();
+    }).then(function(blob) {
+        // Step 2: Get current commit
+        return fetch(baseUrl + '/git/refs/heads/' + KB_CLOUD_CONFIG.branch, { headers: headers })
+            .then(function(res) { return res.json(); })
+            .then(function(ref) {
+                return fetch(baseUrl + '/git/commits/' + ref.object.sha, { headers: headers })
+                    .then(function(res2) { return res2.json(); })
+                    .then(function(commit) {
+                        // Step 3: Create new tree
+                        return fetch(baseUrl + '/git/trees', {
+                            method: 'POST',
+                            headers: headers,
+                            body: JSON.stringify({
+                                base_tree: commit.tree.sha,
+                                tree: [{ path: KB_CLOUD_CONFIG.dataPath, mode: '100644', type: 'blob', sha: blob.sha }]
+                            })
+                        }).then(function(res3) { return res3.json(); })
+                        .then(function(tree) {
+                            // Step 4: Create commit
+                            return fetch(baseUrl + '/git/commits', {
+                                method: 'POST',
+                                headers: headers,
+                                body: JSON.stringify({
+                                    message: message,
+                                    tree: tree.sha,
+                                    parents: [ref.object.sha]
+                                })
+                            }).then(function(res4) { return res4.json(); })
+                            .then(function(newCommit) {
+                                // Step 5: Update ref
+                                return fetch(baseUrl + '/git/refs/heads/' + KB_CLOUD_CONFIG.branch, {
+                                    method: 'PATCH',
+                                    headers: headers,
+                                    body: JSON.stringify({ sha: newCommit.sha, force: false })
+                                });
+                            });
+                        });
+                    });
+            });
+    });
+}
+
 // Save edit data to cloud (GitHub) + local IndexedDB as backup
 function saveChanges() {
     var data = {};
@@ -3627,33 +3687,17 @@ function saveChanges() {
                 updateSaveIndicator();
             });
         } else {
-            // GitHub Pages 模式：使用 GitHub API（需要 Token）
+            // GitHub Pages 模式：使用 Git Data API 保存（可靠处理大文件）
             showToast('⏳ 正在保存到云端...', 2000);
-            githubGetFileSha(KB_CLOUD_CONFIG.dataPath).then(function(existing) {
-                var sha = existing ? existing.sha : null;
-                return githubPutFile(KB_CLOUD_CONFIG.dataPath, jsonStr, sha, 'Save data: ' + data['_savedAt']);
-            }).then(function() {
+            githubSaveViaGitAPI(jsonStr, 'Save data: ' + data['_savedAt']).then(function() {
                 showToast('☁️ 云端保存成功！所有设备刷新即可看到', 3000);
                 hasUnsavedChanges = false;
                 updateSaveIndicator();
             }).catch(function(err) {
                 console.error('Cloud save failed:', err);
-                if (err.message.indexOf('422') >= 0 || err.message.indexOf('409') >= 0) {
-                    showToast('⏳ 重试中...', 1000);
-                    githubPutFile(KB_CLOUD_CONFIG.dataPath, jsonStr, null, 'Save data (retry): ' + data['_savedAt']).then(function() {
-                        showToast('☁️ 云端保存成功！', 2000);
-                        hasUnsavedChanges = false;
-                        updateSaveIndicator();
-                    }).catch(function(err2) {
-                        showToast('⚠️ 重试失败：' + err2.message, 4000);
-                        hasUnsavedChanges = false;
-                        updateSaveIndicator();
-                    });
-                } else {
-                    showToast('⚠️ 云端保存失败：' + err.message + '（已保存到本地）', 4000);
-                    hasUnsavedChanges = false;
-                    updateSaveIndicator();
-                }
+                showToast('⚠️ 云端保存失败：' + err.message + '（已保存到本地）', 5000);
+                hasUnsavedChanges = false;
+                updateSaveIndicator();
             });
         }
     } else {
