@@ -3032,7 +3032,7 @@ function addBlock(type, value) {
                     '<button class="block-upload-btn block-video-upload-btn" onclick="triggerVideoUpload(this)" title="选择本地视频上传" style="border-color:#8b5cf6;background:#f5f3ff;color:#6d28d9;">🎬 上传视频</button>' +
                 '</div>' +
                 '<div class="block-video-preview-wrap">' + previewHtml + '</div>' +
-                '<div style="font-size:11px;color:#94a3b8;">支持上传 mp4/webm 格式，或粘贴腾讯视频/B站/YouTube嵌入链接</div>' +
+                '<div style="font-size:11px;color:#94a3b8;">支持上传 mp4/webm（≤50MB），或粘贴腾讯视频/B站/YouTube嵌入链接</div>' +
             '</div>';
     } else {
         contentHtml = '<input type="text" class="block-content-input" placeholder="请输入内容..." value="' + (value || '') + '">';
@@ -3120,7 +3120,7 @@ function triggerUpload(btn) {
     fileInput.click();
 }
 
-// Trigger hidden file input for video upload
+// Trigger hidden file input for video upload — uploads to GitHub media/ directory
 function triggerVideoUpload(btn) {
     var block = btn.closest('.content-block');
     var existingInput = block.querySelector('.block-video-file-input');
@@ -3130,33 +3130,86 @@ function triggerVideoUpload(btn) {
     }
     var fileInput = document.createElement('input');
     fileInput.type = 'file';
-    fileInput.accept = 'video/*';
+    fileInput.accept = 'video/mp4,video/webm,video/ogg,.mp4,.webm,.mov';
     fileInput.className = 'block-video-file-input';
     fileInput.style.display = 'none';
     fileInput.onchange = function(e) {
         var file = e.target.files[0];
         if (!file) return;
-        // Check file size (max 100MB for video — IndexedDB can handle it)
-        if (file.size > 100 * 1024 * 1024) {
-            showToast('⚠️ 视频不能超过 100MB，请压缩后再上传', 3000);
+        // GitHub file size limit: 100MB, but keep 50MB for reliable upload
+        if (file.size > 50 * 1024 * 1024) {
+            showToast('⚠️ 视频不能超过 50MB，请压缩后再上传', 4000);
             return;
         }
         var sizeMB = (file.size / (1024 * 1024)).toFixed(1);
-        showToast('⏳ 正在读取视频：' + file.name + ' (' + sizeMB + 'MB)...', 3000);
+        var ext = file.name.split('.').pop().toLowerCase();
+        if (ext === 'mov') ext = 'mp4'; // normalize
+        var filename = 'video_' + Date.now() + '.' + ext;
+        var mediaPath = 'media/' + filename;
+
+        // For local mode: upload via Python server
+        if (KB_LOCAL_MODE) {
+            showToast('⏳ 正在上传视频：' + file.name + ' (' + sizeMB + 'MB)...', 3000);
+            var formData = new FormData();
+            formData.append('file', file);
+            formData.append('path', mediaPath);
+            fetch('/api/upload-media', {
+                method: 'POST',
+                body: formData
+            }).then(function(res) { return res.json(); })
+            .then(function(result) {
+                if (result.success) {
+                    var videoInput = block.querySelector('.block-video-input');
+                    if (videoInput) videoInput.value = mediaPath;
+                    var previewWrap = block.querySelector('.block-video-preview-wrap');
+                    if (previewWrap) {
+                        previewWrap.innerHTML = '<video class="block-video-preview" src="' + mediaPath + '" controls style="max-width:200px;max-height:120px;border-radius:6px;border:1px solid #e2e8f0;"></video>';
+                    }
+                    showToast('✅ 视频上传成功：' + filename + ' (' + sizeMB + 'MB)', 3000);
+                } else {
+                    showToast('⚠️ 上传失败：' + (result.message || '未知错误'), 3000);
+                }
+            }).catch(function(err) {
+                showToast('⚠️ 上传失败：' + err.message, 3000);
+            });
+            return;
+        }
+
+        // GitHub Pages mode: upload via Git Data API
+        if (!isCloudConfigured()) {
+            showToast('⚠️ 云端未配置，无法上传视频', 3000);
+            return;
+        }
+
+        showToast('⏳ 正在上传视频到云端：' + file.name + ' (' + sizeMB + 'MB)...', 5000);
 
         var reader = new FileReader();
         reader.onload = function(ev) {
-            var dataUrl = ev.target.result;
-            var videoInput = block.querySelector('.block-video-input');
-            if (videoInput) {
-                videoInput.value = dataUrl;
-            }
-            // Update preview
-            var previewWrap = block.querySelector('.block-video-preview-wrap');
-            if (previewWrap) {
-                previewWrap.innerHTML = '<video class="block-video-preview" src="' + dataUrl + '" controls style="max-width:200px;max-height:120px;border-radius:6px;border:1px solid #e2e8f0;"></video>';
-            }
-            showToast('✅ 视频已加载：' + file.name + ' (' + sizeMB + 'MB)', 2000);
+            // Extract base64 content (without data: prefix)
+            var base64 = ev.target.result.split(',')[1];
+
+            // Disable the upload button during upload
+            btn.disabled = true;
+            btn.textContent = '⏳ 上传中...';
+
+            githubUploadMedia(mediaPath, base64, file.name).then(function(mediaUrl) {
+                var videoInput = block.querySelector('.block-video-input');
+                if (videoInput) {
+                    videoInput.value = mediaUrl;
+                }
+                var previewWrap = block.querySelector('.block-video-preview-wrap');
+                if (previewWrap) {
+                    previewWrap.innerHTML = '<video class="block-video-preview" src="' + mediaUrl + '" controls style="max-width:200px;max-height:120px;border-radius:6px;border:1px solid #e2e8f0;"></video>';
+                }
+                btn.disabled = false;
+                btn.textContent = '🎬 上传视频';
+                showToast('✅ 视频上传成功：' + filename + ' (' + sizeMB + 'MB)', 3000);
+            }).catch(function(err) {
+                console.error('Video upload failed:', err);
+                btn.disabled = false;
+                btn.textContent = '🎬 上传视频';
+                showToast('⚠️ 视频上传失败：' + err.message + '\n可尝试粘贴外链视频地址', 5000);
+            });
         };
         reader.onerror = function() {
             showToast('❌ 视频读取失败，请重试', 3000);
@@ -3657,7 +3710,66 @@ function githubSaveViaGitAPI(content, message) {
     });
 }
 
-// Save edit data to cloud (GitHub) + local IndexedDB as backup
+// GitHub API: Upload media file (video/image) to media/ directory via Git Data API
+function githubUploadMedia(path, base64Content, originalName) {
+    var baseUrl = 'https://api.github.com/repos/' + KB_CLOUD_CONFIG.owner + '/' + KB_CLOUD_CONFIG.repo;
+    var headers = {
+        'Authorization': 'token ' + KB_CLOUD_CONFIG.token,
+        'Accept': 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json'
+    };
+    // Step 1: Create blob
+    return fetch(baseUrl + '/git/blobs', {
+        method: 'POST', headers: headers,
+        body: JSON.stringify({ content: base64Content, encoding: 'base64' })
+    }).then(function(res) {
+        if (!res.ok) throw new Error('blob: ' + res.status);
+        return res.json();
+    }).then(function(blob) {
+        // Step 2: Get current ref + commit tree
+        return fetch(baseUrl + '/git/refs/heads/' + KB_CLOUD_CONFIG.branch, { headers: headers })
+            .then(function(res) { return res.json(); })
+            .then(function(ref) {
+                return fetch(baseUrl + '/git/commits/' + ref.object.sha, { headers: headers })
+                    .then(function(res) { return res.json(); })
+                    .then(function(commit) {
+                        // Step 3: Create new tree with media file
+                        return fetch(baseUrl + '/git/trees', {
+                            method: 'POST', headers: headers,
+                            body: JSON.stringify({
+                                base_tree: commit.tree.sha,
+                                tree: [{ path: path, mode: '100644', type: 'blob', sha: blob.sha }]
+                            })
+                        }).then(function(res) { return res.json(); })
+                        .then(function(tree) {
+                            // Step 4: Create commit
+                            return fetch(baseUrl + '/git/commits', {
+                                method: 'POST', headers: headers,
+                                body: JSON.stringify({
+                                    message: 'Upload media: ' + (originalName || path),
+                                    tree: tree.sha,
+                                    parents: [ref.object.sha]
+                                })
+                            }).then(function(res) { return res.json(); })
+                            .then(function(newCommit) {
+                                // Step 5: Update ref
+                                return fetch(baseUrl + '/git/refs/heads/' + KB_CLOUD_CONFIG.branch, {
+                                    method: 'PATCH', headers: headers,
+                                    body: JSON.stringify({ sha: newCommit.sha, force: false })
+                                });
+                            });
+                        });
+                    });
+            });
+    }).then(function() {
+        // Return the media URL path for use in HTML
+        var mediaUrl = 'media/' + path.split('/').pop();
+        if (KB_LOCAL_MODE) {
+            mediaUrl = 'media/' + path.split('/').pop();
+        }
+        return mediaUrl;
+    });
+}
 function saveChanges() {
     var data = {};
     var caseOrder = [];
