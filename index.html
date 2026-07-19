@@ -488,6 +488,8 @@
             white-space: nowrap;
         }
         .case-action-btn:hover { background: #eff6ff; border-color: #93c5fd; color: #2563eb; }
+        .case-action-btn.case-action-delete { border-color: #fca5a5; color: #dc2626; }
+        .case-action-btn.case-action-delete:hover { background: #fef2f2; border-color: #f87171; color: #b91c1c; }
 
         /* Image actions in edit mode */
         .image-wrapper { position: relative; display: inline-block; }
@@ -873,8 +875,7 @@
     <button class="edit-btn edit-btn-toggle" id="btnEditMode" onclick="toggleEditMode()">✏️ 编辑模式</button>
     <button class="edit-btn" id="btnAddCase" onclick="openAddCasePanel()" style="background:#10b981;color:white;display:none;">➕ 新增案例</button>
     <button class="edit-btn" id="btnAddCat" onclick="openAddCategoryPanel()" style="background:#8b5cf6;color:white;display:none;">📂 新增分类</button>
-    <button class="edit-btn edit-btn-save" id="btnSave" onclick="saveChanges()">💾 保存</button>
-    <button class="edit-btn" id="btnCloudSave" onclick="saveToCloud()" style="background:#0ea5e9;color:white;display:none;">☁️ 云端同步</button>
+    <button class="edit-btn edit-btn-save" id="btnSave" onclick="saveChanges()" style="background:#0ea5e9;color:white;">☁️ 保存到云端</button>
     <button class="edit-btn edit-btn-export" id="btnExport" onclick="exportHTML()">📥 导出HTML</button>
     <button class="edit-btn edit-btn-cancel" id="btnCancel" onclick="cancelEdit()">✕ 退出</button>
 </div>
@@ -2450,12 +2451,12 @@ function updateSaveIndicator() {
     var btnSave = document.getElementById('btnSave');
     if (!btnSave) return;
     if (hasUnsavedChanges) {
-        btnSave.textContent = '💾 保存 *';
+        btnSave.textContent = '☁️ 保存到云端 *';
         btnSave.style.background = '#f59e0b';
         btnSave.title = '有未保存的修改';
     } else {
-        btnSave.textContent = '💾 保存';
-        btnSave.style.background = '';
+        btnSave.textContent = '☁️ 保存到云端';
+        btnSave.style.background = '#0ea5e9';
         btnSave.title = '';
     }
 }
@@ -2511,8 +2512,6 @@ function toggleEditMode() {
         btnCancel.style.display = 'inline-flex';
         btnAddCase.style.display = 'inline-flex';
         btnAddCat.style.display = 'inline-flex';
-        var btnCloudSave = document.getElementById('btnCloudSave');
-        if (btnCloudSave) btnCloudSave.style.display = 'inline-flex';
         // Add edit buttons to each case
         addCaseEditButtons();
         // Add "add case" buttons to each category
@@ -2545,8 +2544,6 @@ function exitEditMode() {
     btnCancel.style.display = 'none';
     btnAddCase.style.display = 'none';
     btnAddCat.style.display = 'none';
-    var btnCloudSave = document.getElementById('btnCloudSave');
-    if (btnCloudSave) btnCloudSave.style.display = 'none';
 }
 
 function cancelEdit() {
@@ -2583,6 +2580,14 @@ function addCaseEditButtons() {
         btnDown.title = '下移案例';
         btnDown.onclick = function() { moveCase(caseId, 1); };
         actions.appendChild(btnDown);
+        
+        // Delete button
+        var btnDel = document.createElement('button');
+        btnDel.className = 'case-action-btn case-action-delete';
+        btnDel.textContent = '🗑 删除';
+        btnDel.title = '删除此案例';
+        btnDel.onclick = function() { deleteCase(caseId); };
+        actions.appendChild(btnDel);
         
         header.appendChild(actions);
         
@@ -2649,6 +2654,32 @@ function moveCase(caseId, dir) {
     markUnsaved();
     saveChanges();
     showToast(dir < 0 ? '↑ 已上移' : '↓ 已下移', 1000);
+}
+
+// Delete a case
+function deleteCase(caseId) {
+    var card = document.getElementById(caseId);
+    if (!card) return;
+    var title = card.querySelector('.case-title');
+    var titleText = title ? title.textContent : '此案例';
+    if (!confirm('确定要删除「' + titleText + '」吗？\n\n删除后点击「保存到云端」生效。')) return;
+
+    var category = card.closest('.category');
+    // Remove nav item
+    var navItem = document.querySelector('.nav-item[href="#' + caseId + '"]');
+    if (navItem) navItem.remove();
+    // Remove card
+    card.remove();
+    // Update category count
+    if (category) {
+        var countEl = category.querySelector('.cat-count');
+        if (countEl) {
+            var count = category.querySelectorAll('.case-card').length;
+            countEl.textContent = count + ' 个案例';
+        }
+    }
+    markUnsaved();
+    showToast('🗑 已删除「' + titleText + '」，请点击「保存到云端」', 3000);
 }
 
 // Add "add case" button to each category
@@ -3657,10 +3688,7 @@ function saveChanges() {
 
     var jsonStr = JSON.stringify(data);
 
-    // Save to IndexedDB as local backup
-    saveToLocalBackup(data);
-
-    // If cloud is configured, also save to GitHub
+    // If cloud is configured, save to GitHub
     if (isCloudConfigured()) {
         // 本地编辑器模式：直接 POST 到 Python 服务器，无需 Token
         if (KB_LOCAL_MODE) {
@@ -3701,10 +3729,7 @@ function saveChanges() {
             });
         }
     } else {
-        // No cloud config — just save locally
-        showToast('💾 已保存到本地浏览器', 3000);
-        hasUnsavedChanges = false;
-        updateSaveIndicator();
+        showToast('⚠️ 云端未配置，无法保存', 3000);
     }
 }
 
